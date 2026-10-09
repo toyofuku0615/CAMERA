@@ -1,92 +1,113 @@
-import { DETECTION, GUIDE, type DetectionSettings } from '../config';
+import { DETECTION, type DetectionSettings } from '../config';
+import { estimateTorso, type Point, type TorsoRegion } from './person';
 export interface Pixels { width: number; height: number; data: Uint8ClampedArray }
-export interface Box { x: number; y: number; width: number; height: number; area: number }
-export interface Analysis { status: 'ok' | 'uncertain'; boxes: Box[]; region: Box; clothBounds?: Box; reason?: string; darkCoverage: number; sharpness: number }
-
-// All coordinates refer to the same (already mirrored) image. No model or network call.
-export function analyze(image: Pixels, settings: DetectionSettings = DETECTION): Analysis {
-  const { width: w, height: h, data } = image;
-  const luminance = new Float32Array(w * h);
-  for (let i = 0; i < luminance.length; i++) luminance[i] = data[i * 4] * .2126 + data[i * 4 + 1] * .7152 + data[i * 4 + 2] * .0722;
-  const margin = settings.regionMargin;
-  const x0 = Math.max(1, Math.floor(w * (GUIDE.x + margin))), y0 = Math.max(1, Math.floor(h * (GUIDE.y + margin)));
-  const x1 = Math.min(w - 2, Math.ceil(w * (GUIDE.x + GUIDE.width - margin))), y1 = Math.min(h - 2, Math.ceil(h * (GUIDE.y + GUIDE.height - margin)));
-  const region = { x: x0, y: y0, width: x1 - x0, height: y1 - y0, area: (x1 - x0) * (y1 - y0) };
-  const visited = new Uint8Array(w * h), cloth = new Uint8Array(w * h);
-  const queue = new Int32Array(w * h);
-  let largest: number[] = [];
-  // Largest connected dark component in the torso guide is a conservative garment proxy.
-  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
-    const seed = y * w + x;
-    if (visited[seed] || luminance[seed] > settings.darkThreshold) continue;
-    let head = 0, tail = 1; queue[0] = seed; visited[seed] = 1;
-    const component: number[] = [];
+export interface Box { x: number; y: number; width: number; height: number; area: number; confidence?: 'confirmed' | 'single-frame'; support?: number }
+export interface Candidate { box: Box; accepted: boolean; reason: string; contrast: number; surroundingDark: number }
+export interface Analysis {
+  status: 'ok' | 'uncertain'; boxes: Box[]; region: Box; reason?: string;
+  darkCoverage: number; sharpness: number; torso: Point[]; roiSource: TorsoRegion['source']; maskCoverage: number;
+  candidates: Candidate[]; warnings: string[];
+}
+export function emptyAnalysis(reason: string): Analysis { return { status: 'uncertain', boxes: [], region: { x: 0, y: 0, width: 0, height: 0, area: 0 }, sharpness: 0, darkCoverage: 0, torso: [], roiSource: 'none', maskCoverage: 0, candidates: [], warnings: [], reason }; }
+export function sharpness(image: Pixels, roi?: Uint8Array) {
+  const { width: w, height: h, data } = image; let sum = 0, count = 0;
+  const lum = (p: number) => data[p * 4] * .2126 + data[p * 4 + 1] * .7152 + data[p * 4 + 2] * .0722;
+  for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+    const p = y * w + x; if (roi && !roi[p]) continue;
+    const lap = lum(p - 1) + lum(p + 1) + lum(p - w) + lum(p + w) - 4 * lum(p); sum += lap * lap; count++;
+  }
+  return sum / Math.max(1, count);
+}
+// A person mask + anatomical torso must precede detection. Darkness never defines the ROI.
+export function analyze(image: Pixels, settings: DetectionSettings = DETECTION, torso: TorsoRegion = estimateTorso(null, image.width, image.height), diagnostics = false): Analysis {
+  const { width: w, height: h, data } = image, { roi } = torso;
+  const result: Analysis = { ...emptyAnalysis(torso.reason ?? ''), region: torso.bounds, torso: torso.polygon, roiSource: torso.source, maskCoverage: torso.coverage, sharpness: sharpness(image, roi) };
+  if (torso.source === 'none' || torso.width !== w || torso.height !== h || roi.length !== w * h || torso.coverage < (torso.source === 'pose' ? .6 : .15)) return result;
+  const luminance = new Float32Array(w * h), neutral = new Uint8Array(w * h);
+  let dark = 0, eligible = 0;
+  for (let p = 0; p < luminance.length; p++) {
+    const r = data[p * 4], g = data[p * 4 + 1], b = data[p * 4 + 2];
+    luminance[p] = r * .2126 + g * .7152 + b * .0722;
+    neutral[p] = Number((Math.max(r, g, b) - Math.min(r, g, b)) / Math.max(1, luminance[p]) <= settings.maxSaturation);
+    if (roi[p]) { eligible++; if (luminance[p] <= settings.darkThreshold) dark++; }
+  }
+  result.darkCoverage = dark / Math.max(1, eligible);
+  if (result.darkCoverage < settings.minDarkCoverage) return { ...result, reason: '黒い生地を十分に確認できませんでした。無地の黒い服と照明を確認してください。' };
+  const stride = w + 1, integral = new Float64Array((w + 1) * (h + 1)), counts = new Uint32Array(integral.length);
+  for (let y = 0; y < h; y++) {
+    let rowSum = 0, rowCount = 0;
+    for (let x = 0; x < w; x++) {
+      const p = y * w + x, i = (y + 1) * stride + x + 1;
+      if (roi[p] && luminance[p] <= settings.darkThreshold) { rowSum += luminance[p]; rowCount++; }
+      integral[i] = integral[i - stride] + rowSum; counts[i] = counts[i - stride] + rowCount;
+    }
+  }
+  const radius = Math.max(2, Math.round(settings.localWindowRadius * w / settings.analysisWidth)), bright = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const p = y * w + x; if (!roi[p] || !neutral[p] || luminance[p] < settings.minLocalBrightness) continue;
+    const x0 = Math.max(0, x - radius), y0 = Math.max(0, y - radius), x1 = Math.min(w, x + radius + 1), y1 = Math.min(h, y + radius + 1);
+    const a = y0 * stride + x0, b = y0 * stride + x1, c = y1 * stride + x0, d = y1 * stride + x1;
+    const mean = (integral[d] - integral[b] - integral[c] + integral[a]) / Math.max(1, counts[d] - counts[b] - counts[c] + counts[a]);
+    bright[p] = Number(luminance[p] >= settings.brightnessThreshold || luminance[p] - mean >= settings.contrastThreshold);
+  }
+  const visited = new Uint8Array(w * h), queue = new Int32Array(w * h), areaScale = (w / settings.analysisWidth) ** 2;
+  for (let seed = 0; seed < bright.length; seed++) {
+    if (!bright[seed] || visited[seed]) continue;
+    let head = 0, tail = 1, minX = seed % w, maxX = minX, minY = Math.floor(seed / w), maxY = minY, sum = 0;
+    visited[seed] = 1; queue[0] = seed;
     while (head < tail) {
-      const p = queue[head++], px = p % w, py = Math.floor(p / w); component.push(p);
-      for (const [nx, ny] of [[px - 1, py], [px + 1, py], [px, py - 1], [px, py + 1]]) {
-        const n = ny * w + nx;
-        if (nx < x0 || nx > x1 || ny < y0 || ny > y1 || visited[n] || luminance[n] > settings.darkThreshold) continue;
+      const p = queue[head++], x = p % w, y = Math.floor(p / w); sum += luminance[p];
+      minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+      // Eight-connectivity keeps tilted stickers intact.
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const nx = x + dx, ny = y + dy, n = ny * w + nx;
+        if ((!dx && !dy) || nx < 0 || nx >= w || ny < 0 || ny >= h || visited[n] || !bright[n]) continue;
         visited[n] = 1; queue[tail++] = n;
       }
     }
-    if (component.length > largest.length) largest = component;
-  }
-  let left = w, right = 0, top = h, bottom = 0;
-  for (const p of largest) { cloth[p] = 1; const x = p % w, y = Math.floor(p / w); left = Math.min(left, x); right = Math.max(right, x); top = Math.min(top, y); bottom = Math.max(bottom, y); }
-  const darkCoverage = largest.length / Math.max(1, region.area);
-  let energy = 0, samples = 0;
-  for (let y = y0 + 1; y < y1; y++) for (let x = x0 + 1; x < x1; x++) {
-    const p = y * w + x;
-    const lap = luminance[p - 1] + luminance[p + 1] + luminance[p - w] + luminance[p + w] - 4 * luminance[p];
-    energy += lap * lap; samples++;
-  }
-  const sharpness = energy / Math.max(1, samples);
-  const result: Analysis = { status: 'ok', boxes: [], region, darkCoverage, sharpness };
-  if (largest.length) result.clothBounds = { x: left, y: top, width: right - left + 1, height: bottom - top + 1, area: largest.length };
-  if (darkCoverage < settings.minDarkCoverage || bottom - top < region.height * .65 || right - left < region.width * .16) {
-    return { ...result, status: 'uncertain', reason: '服の範囲を十分に確認できませんでした。黒いセーターをガイド内に収めてください。' };
-  }
-  // If garment fills the whole guide, its boundaries cannot be verified: don't certify an empty frame.
-  if (left <= x0 + 1 && right >= x1 - 1) return { ...result, status: 'uncertain', reason: '上半身が収まる位置に移動してください。服の両側に背景が見えるようにしてください。' };
-  if (sharpness < settings.minSharpness) return { ...result, status: 'uncertain', reason: '画像が不鮮明です。明るい場所で静止し、もう一度撮影してください。' };
-  visited.fill(0);
-  const areaScale = (w / settings.analysisWidth) ** 2;
-  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
-    const seed = y * w + x;
-    if (visited[seed] || luminance[seed] < settings.brightnessThreshold) continue;
-    let head = 0, tail = 1, minX = x, maxX = x, minY = y, maxY = y, sum = 0;
-    queue[0] = seed; visited[seed] = 1;
-    while (head < tail) {
-      const p = queue[head++], px = p % w, py = Math.floor(p / w);
-      minX = Math.min(minX, px); maxX = Math.max(maxX, px); minY = Math.min(minY, py); maxY = Math.max(maxY, py); sum += luminance[p];
-      for (const [nx, ny] of [[px - 1, py], [px + 1, py], [px, py - 1], [px, py + 1]]) {
-        const n = ny * w + nx;
-        if (nx < x0 || nx > x1 || ny < y0 || ny > y1 || visited[n] || luminance[n] < settings.brightnessThreshold) continue;
-        visited[n] = 1; queue[tail++] = n;
-      }
-    }
-    if (tail < settings.minArea * areaScale || tail > settings.maxArea * areaScale || minX <= x0 || maxX >= x1 || minY <= y0 || maxY >= y1) continue;
     const bw = maxX - minX + 1, bh = maxY - minY + 1;
-    if (Math.max(bw / bh, bh / bw) > 8 || tail / (bw * bh) < .3) continue;
-    const ring = Math.max(2, Math.round(Math.min(bw, bh) * .35));
-    let ringCount = 0, darkCount = 0, darkSum = 0;
-    const sides = [0, 0, 0, 0], sideTotals = [0, 0, 0, 0];
-    for (let ry = minY - ring; ry <= maxY + ring; ry++) for (let rx = minX - ring; rx <= maxX + ring; rx++) {
-      if (rx >= minX && rx <= maxX && ry >= minY && ry <= maxY) continue;
-      if (rx < x0 || rx > x1 || ry < y0 || ry > y1) continue;
-      const p = ry * w + rx; ringCount++;
-      const side = rx < minX ? 0 : rx > maxX ? 1 : ry < minY ? 2 : 3; sideTotals[side]++;
-      if (cloth[p]) { darkCount++; darkSum += luminance[p]; sides[side]++; }
+    const box: Box = { x: minX, y: minY, width: bw, height: bh, area: tail };
+    const candidate: Candidate = { box, accepted: false, reason: '', contrast: 0, surroundingDark: 0 };
+    result.candidates.push(candidate);
+    if (tail < settings.minArea * areaScale) { candidate.reason = '最小面積未満'; continue; }
+    if (tail > settings.maxArea * areaScale) { candidate.reason = '最大面積超過'; continue; }
+    if (Math.max(bw / bh, bh / bw) > 8 || tail / (bw * bh) < .3) { candidate.reason = '形状・充填率が対象外'; continue; }
+    const ring = Math.max(2, Math.round(Math.min(bw, bh) * .5));
+    let total = 0, inTorso = 0, darkCount = 0, darkSum = 0;
+    for (let y = Math.max(0, minY - ring); y <= Math.min(h - 1, maxY + ring); y++) for (let x = Math.max(0, minX - ring); x <= Math.min(w - 1, maxX + ring); x++) {
+      if (x >= minX && x <= maxX && y >= minY && y <= maxY) continue;
+      total++; const p = y * w + x; if (!roi[p]) continue;
+      inTorso++; if (luminance[p] <= settings.darkThreshold) { darkCount++; darkSum += luminance[p]; }
     }
-    // Bright walls, skin, and garment-edge reflections are rejected unless enclosed by cloth.
-    if (darkCount / Math.max(1, ringCount) < settings.minSurroundingDark || sides.some((n, i) => n / Math.max(1, sideTotals[i]) < .55)) continue;
-    if (sum / tail - darkSum / Math.max(1, darkCount) < settings.contrastThreshold) continue;
-    result.boxes.push({ x: minX, y: minY, width: bw, height: bh, area: tail });
+    candidate.surroundingDark = darkCount / Math.max(1, inTorso);
+    candidate.contrast = sum / tail - darkSum / Math.max(1, darkCount);
+    if (inTorso / Math.max(1, total) < .65) { candidate.reason = '人物・胴体の境界に接している'; continue; }
+    if (candidate.surroundingDark < settings.minSurroundingDark) { candidate.reason = '周囲の黒い生地が不足'; continue; }
+    if (candidate.contrast < settings.contrastThreshold) { candidate.reason = '局所的な明暗差が不足'; continue; }
+    candidate.accepted = true; candidate.reason = '局所的な明暗差・面積・形状を確認'; result.boxes.push(box);
   }
+  if (diagnostics) {
+    const seen = new Uint8Array(w * h);
+    for (let seed = 0; seed < luminance.length; seed++) {
+      if (seen[seed] || roi[seed] || !neutral[seed] || luminance[seed] < settings.brightnessThreshold) continue;
+      let head = 0, tail = 1, minX = seed % w, maxX = minX, minY = Math.floor(seed / w), maxY = minY, personPixels = 0;
+      queue[0] = seed; seen[seed] = 1;
+      while (head < tail) {
+        const p = queue[head++], x = p % w, y = Math.floor(p / w); personPixels += torso.personMask[p];
+        minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+        for (const n of [x > 0 ? p - 1 : -1, x < w - 1 ? p + 1 : -1, y > 0 ? p - w : -1, y < h - 1 ? p + w : -1]) {
+          if (n < 0 || seen[n] || roi[n] || !neutral[n] || luminance[n] < settings.brightnessThreshold) continue;
+          seen[n] = 1; queue[tail++] = n;
+        }
+      }
+      if (tail >= settings.minArea * areaScale) result.candidates.push({ box: { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1, area: tail }, accepted: false, reason: personPixels / tail > .5 ? '人物マスク内・胴体範囲外（顔・手等）' : '人物マスク外（背景）', contrast: 0, surroundingDark: 0 });
+    }
+  }
+  result.status = torso.reason ? 'uncertain' : 'ok'; result.reason = torso.reason;
+  if (result.sharpness < settings.minSharpness) { result.status = 'uncertain'; result.reason = '画像が不鮮明です。明るい場所で静止し、もう一度撮影してください。'; }
   return result;
 }
-
 export function scaleAnalysis(result: Analysis, scaleX: number, scaleY: number): Analysis {
-  const scale = (b: Box): Box => ({ x: b.x * scaleX, y: b.y * scaleY, width: b.width * scaleX, height: b.height * scaleY, area: b.area * scaleX * scaleY });
-  return { ...result, boxes: result.boxes.map(scale), region: scale(result.region), clothBounds: result.clothBounds && scale(result.clothBounds) };
+  const scale = (b: Box): Box => ({ ...b, x: b.x * scaleX, y: b.y * scaleY, width: b.width * scaleX, height: b.height * scaleY, area: b.area * scaleX * scaleY });
+  return { ...result, boxes: result.boxes.map(scale), region: scale(result.region), torso: result.torso.map(p => ({ x: p.x * scaleX, y: p.y * scaleY })), candidates: result.candidates.map(c => ({ ...c, box: scale(c.box) })) };
 }
