@@ -26,3 +26,14 @@ export const PERSON_MODEL = {
 };
 export const PERSON = { maskThreshold: 0.55, minTorsoImageArea: 0.015, clothesThreshold: 0.45, skinThreshold: 0.45 };
 export const TEMPORAL = { maxAnalyzedFrames: 2, minimumOverlap: 0.2, centerToleranceRatio: 0.035, maxAreaRatio: 3 };
+
+// Demo mode: bounded work on decoded video frames, no model initialization.
+export const LIVE = {
+  analysisWidth: 320, maxAnalysisHeight: 640, intervalMs: 100, staleAfterMs: 750,
+  whiteThreshold: 145, darkThreshold: 95, contrastThreshold: 65, maxSaturation: .38,
+  minArea: 6, maxArea: 1800, minFillRatio: .45, maxAspectRatio: 6,
+  minSurroundingDark: .78, minDarkCoverage: .2, ringRadius: 10,
+  confirmationFrames: 2, matchDistance: 12, voiceCooldownMs: 3500,
+};
+export type LiveSettings = typeof LIVE;
+export const LIVE_GUIDE = { x: .22, y: .28, width: .56, height: .48 };

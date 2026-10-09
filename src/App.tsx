@@ -7,8 +7,9 @@ import { VoiceGuide } from './services/speech';
 import { processShot, type CheckResult } from './vision/frames';
 import { loadPersonModel, disposePersonModel, ModelLoadError } from './vision/model';
 import { AnnotatedImage } from './components/AnnotatedImage';
+import { LiveCheck } from './components/LiveCheck';
 
-type Screen = 'home' | 'prepare' | 'capture' | 'analyze' | 'results';
+type Screen = 'home' | 'live' | 'prepare' | 'capture' | 'analyze' | 'results';
 const errorMessage = (e: unknown) => e instanceof Error ? e.message : '処理を続けられませんでした。再試行してください。';
 function SweaterArt() {
   return <svg className="sweater-art" viewBox="0 0 420 410" role="img" aria-label="黒いセーターの背中を確認するイメージ図">
@@ -41,6 +42,7 @@ export function App() {
   useEffect(() => {
     document.title = `${APP.name} — 服装チェック`;
     const suspend = () => {
+      if (screenRef.current === 'live') return; // LiveCheck owns its stream and lifecycle.
       if (document.hidden || screenRef.current === 'capture') {
         generation.current++; controller.current?.abort(); voice.current?.cancel(); disposePersonModel(); stopCamera(currentStream.current); currentStream.current = null;
         setStream(null); setReady(false); setLoading(false); setResults([]); setRetryDirections(undefined);
@@ -108,6 +110,7 @@ export function App() {
     } finally { shots.forEach(s => s.frames.forEach(c => { c.width = 0; c.height = 0; })); }
   }
   function home() { cancelWork(); disposePersonModel(); releaseCamera(); setResults([]); setProgress(undefined); setLoading(false); setScreen('home'); setError(''); }
+  function startLive() { cancelWork(); releaseCamera(); setResults([]); voice.current!.enabled = true; voice.current!.unlock('ライブチェックを開始します'); setScreen('live'); }
   function cancelCapture() { cancelWork(); releaseCamera(); setLoading(false); setProgress(undefined); setScreen('prepare'); setError('撮影を中止しました。再開するにはカメラを起動してください。'); }
   const total = results.reduce((n, r) => n + r.analysis.boxes.length + (r.additionalViews ?? []).reduce((sum, v) => sum + v.analysis.boxes.length, 0), 0);
   const failed = results.filter(r => r.analysis.status === 'uncertain').map(r => r.direction);
@@ -117,11 +120,12 @@ export function App() {
   const cameraScreen = screen === 'prepare' || screen === 'capture';
   return <div className={`app screen-${screen}`}>
     <header className="header"><button className="brand" onClick={home} aria-label="ホームに戻る"><span className="brand-symbol">b.</span>{APP.name}</button><span className="header-note">PRIVATE OUTFIT CHECK</span>{screen !== 'home' && <button className="close-button" onClick={home} aria-label="チェックを終了"><X size={20}/></button>}</header>
-    {screen === 'home' && <main className="home"><div className="home-copy"><div className="eyebrow"><span className="tiny-line"/> BEFORE YOU STEP OUT</div><h1>服装を<br/>チェック<span className="title-dot">。</span></h1><p className="home-description">自分では見えないところまで、<br/>身だしなみを確認。</p><p className="home-subtitle">大切な予定の前に、あなたのための30秒。</p><div className="home-cta"><button className="primary" onClick={() => void prepare()}>チェックを開始<ArrowRight size={20}/></button><p><Camera size={14}/> 次の画面でカメラの使用を許可します</p></div></div>
+    {screen === 'home' && <main className="home"><div className="home-copy"><div className="eyebrow"><span className="tiny-line"/> BEFORE YOU STEP OUT</div><h1>服装を<br/>チェック<span className="title-dot">。</span></h1><p className="home-description">自分では見えないところまで、<br/>身だしなみを確認。</p><p className="home-subtitle">黒い服の白いシールを、その場で確認。</p><div className="home-cta"><button className="primary" onClick={startLive}>チェックを開始<ArrowRight size={20}/></button><p><Camera size={14}/> 次の画面でカメラの使用を許可します</p><button className="text-button legacy-check" onClick={() => void prepare()}>4方向を撮影して確認</button></div></div>
       <div className="home-visual"><span className="visual-label">A QUIET CONFIDENCE.</span><SweaterArt/><div className="visual-caption"><span>01 — 04</span><p>正面から、見えない背中まで。</p><ScanLine size={19}/></div></div>
-      <div className="home-bottom"><div className="steps"><div><span>01</span><p>スマホを置く</p></div><div><span>02</span><p>ゆっくり一回転</p></div><div><span>03</span><p>気になる箇所を確認</p></div></div><div className="privacy-note"><ShieldCheck size={19}/><p>画像は端末内で解析。<br/><span>保存・送信・登録は不要です。</span></p></div></div>
-      <p className="scope-note">無地の服に付いた、生地と明るさや色が違うものを確認します。</p>
+      <div className="home-bottom"><div className="steps"><div><span>01</span><p>スマホを置く</p></div><div><span>02</span><p>背中を向ける</p></div><div><span>03</span><p>映像の枠を確認</p></div></div><div className="privacy-note"><ShieldCheck size={19}/><p>画像は端末内で解析。<br/><span>保存・送信・登録は不要です。</span></p></div></div>
+      <p className="scope-note">ライブチェックは、無地の黒い服と白いシール専用です。</p>
     </main>}
+    {screen === 'live' && <LiveCheck voice={voice.current!} onClose={home}/>}
     {cameraScreen && <main className="camera-layout"><section className="camera-copy"><span className="eyebrow">{screen === 'prepare' ? 'SET UP / 撮影準備' : `CAPTURE / ${progress?.preparing ? '準備' : `${(progress?.index ?? 0) + 1} OF ${progress?.total ?? 4}`}`}</span><h1>{screen === 'prepare' ? '大切な時間の、\nその前に。' : progress?.preparing ? '撮影位置へ。' : `${DIRECTIONS.find(d => d.id === progress?.direction)?.label ?? '正面'}の撮影`}</h1>
       {screen === 'prepare' ? <><p className="lead">スマートフォンを安定した場所に設置してください。</p><ol className="setup-list"><li><span>01</span><p>胸の高さにスマホを固定<small>明るい室内で、強い逆光を避けて。</small></p></li><li><span>02</span><p>約1.5〜2m離れて立つ<small>上半身全体が画面に収まる位置に立ってください。</small></p></li><li><span>03</span><p>右へ90度ずつ回転<small>撮影中は音声案内に従ってください。各方向で静止します。</small></p></li></ol><button className="voice-toggle" aria-pressed={voiceOn} onClick={() => setVoiceOn(v => !v)}>{voiceOn ? <Volume2 size={19}/> : <VolumeX size={19}/>}音声案内<span>{voiceOn ? 'オン' : 'オフ'}</span><i className={voiceOn ? 'switch on' : 'switch'}/></button><p className="muted small">音声が聞こえない場合も、画面の数字で撮影が進みます。</p></> : <><p className="capture-instruction" aria-live="polite">{progress?.instruction ?? '撮影を開始します'}</p><p className="muted">数字が消えるまで、その場で静止してください。</p><div className="capture-progress">{(retryDirections ?? DIRECTIONS.map(d => d.id)).map((id, i) => <div key={id} className={i < (progress?.index ?? 0) ? 'done' : i === progress?.index ? 'current' : ''}><span>{i < (progress?.index ?? 0) ? <Check size={14}/> : i + 1}</span><p>{DIRECTIONS.find(d => d.id === id)?.label}</p></div>)}</div></>}
       {modelError && <div className="error" role="alert"><AlertCircle size={20}/><p>{modelError}</p></div>}
