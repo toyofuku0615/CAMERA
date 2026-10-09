@@ -27,9 +27,11 @@ if (!cached) {
     const metadata = await readFile(headers, 'utf8'), expectedMD5 = /\bmd5=([A-Za-z0-9+/=]+)/.exec(metadata)?.[1];
     if (!asset.sha256 && !expectedMD5) throw new Error('Official artifact checksum was not supplied. Refusing an unverified model.');
     if (expectedMD5 && createHash('md5').update(bytes).digest('base64') !== expectedMD5) throw new Error('Google Storage artifact MD5 verification failed.');
-    if (bytes.length < 1_000_000 || bytes[0] !== 0x00 && bytes[0] !== 0x50) throw new Error('Unexpected model format or size.');
+    if (bytes.length < 1_000_000 || bytes.subarray(4, 8).toString('ascii') !== 'TFL3') throw new Error('Unexpected model format or size.');
     await rename(temporary, model); cached = { bytes, hash };
   } finally { await rm(temporary, { force: true }); await rm(headers, { force: true }); }
 }
 await writeFile(manifestFile, JSON.stringify({ runtimeVersion: asset.runtimeVersion, modelVersion: asset.modelVersion, sha256: cached.hash }, null, 2) + '\n');
+// Remove the obsolete, generated pose asset when switching an existing checkout.
+await rm(path.join(directory, 'pose_landmarker_lite-float16-1.task'), { force: true });
 console.log(`Verified ${asset.modelVersion}: ${cached.hash}`);

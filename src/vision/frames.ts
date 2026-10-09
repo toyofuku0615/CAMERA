@@ -24,7 +24,7 @@ export async function analyzeCanvas(canvas: HTMLCanvasElement, settings: Detecti
 export function maskOverlay(torso: TorsoRegion) {
   const c = document.createElement('canvas'); c.width = torso.width; c.height = torso.height;
   const ctx = c.getContext('2d')!, image = ctx.createImageData(c.width, c.height);
-  for (let p = 0; p < torso.personMask.length; p++) if (torso.personMask[p]) {
+  for (let p = 0; p < torso.personMask.length; p++) if (torso.personMask[p] || torso.roi[p]) {
     image.data[p * 4] = torso.roi[p] ? 30 : 70; image.data[p * 4 + 1] = torso.roi[p] ? 180 : 110; image.data[p * 4 + 2] = torso.roi[p] ? 110 : 220; image.data[p * 4 + 3] = 100;
   }
   ctx.putImageData(image, 0, 0); return c.toDataURL();
@@ -34,14 +34,14 @@ export function overlap(a: Box, b: Box) {
   return intersection / Math.max(1, a.width * a.height + b.width * b.height - intersection);
 }
 function basis(a: Analysis) {
-  if (a.roiSource !== 'pose' || a.torso.length !== 4) return null;
+  if (a.roiSource !== 'clothes' || a.torso.length !== 4) return null;
   const [l, r, br, bl] = a.torso;
   const origin = { x: (l.x + r.x) / 2, y: (l.y + r.y) / 2 };
   const u = { x: r.x - l.x, y: r.y - l.y }, v = { x: (br.x + bl.x) / 2 - origin.x, y: (br.y + bl.y) / 2 - origin.y };
   const determinant = u.x * v.y - u.y * v.x;
   return Math.abs(determinant) > 1 ? { origin, u, v, determinant } : null;
 }
-// Translate/scale/rotate by torso landmarks, not background. Unreliable poses are
+// Translate/scale by garment mask bounds, not background. Unreliable masks are
 // never registered: another frame's box then stays on that frame's own image.
 export function alignBox(box: Box, from: Analysis, to: Analysis): Box | null {
   if (from === to) return { ...box };

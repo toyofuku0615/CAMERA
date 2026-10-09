@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-// Only the pose service is replaced in synthetic workflow tests. Camera pixels,
+// Only the garment segmentation service is replaced in synthetic workflow tests. Camera pixels,
 // detection, fusion, drawing and all UI transitions remain production code.
 async function syntheticPose(page: Page) {
   await page.route('**/src/vision/model.ts*', route => route.fulfill({ contentType: 'text/javascript', body: `
@@ -12,10 +12,7 @@ async function syntheticPose(page: Page) {
       let dark=0; for(let i=0;i<pixels.length;i+=4) if(pixels[i]<85) dark++;
       if(!dark) return null;
       for(let y=0;y<height;y++) for(let x=0;x<width;x++) if(x/width>=150/480 && x/width<330/480 && y/height>=165/640 && y/height<510/640) data[y*width+x]=.99;
-      const landmarks=Array.from({length:33},()=>({x:0,y:0,visibility:0}));
-      landmarks[11]={x:155/480,y:180/640,visibility:.99}; landmarks[12]={x:325/480,y:180/640,visibility:.99};
-      landmarks[23]={x:155/480,y:500/640,visibility:.99}; landmarks[24]={x:325/480,y:500/640,visibility:.99};
-      return {landmarks,personCount:1,mask:{width,height,data}};
+      return {mask:{width,height,data},clothes:{width,height,data},skin:{width,height,data:new Float32Array(width*height)}};
     }
   ` }));
 }
@@ -133,13 +130,13 @@ test('model loading failure is explicit and blocks capture until retry succeeds'
   await syntheticCamera(page); await page.unroute('**/src/vision/model.ts*');
   await page.route('**/vision/manifest.json', route => route.fulfill({ status: 503, body: 'unavailable' }));
   await page.goto('/'); await page.getByRole('button', { name: 'チェックを開始', exact: true }).click();
-  await expect(page.getByRole('alert')).toContainText('人物認識モデルを読み込めませんでした');
-  await expect(page.getByRole('button', { name: '人物認識モデルを準備しています' })).toBeDisabled();
-  await page.unroute('**/vision/manifest.json'); await page.getByRole('button', { name: '人物認識モデルを再試行' }).click();
+  await expect(page.getByRole('alert')).toContainText('服認識モデルを読み込めませんでした');
+  await expect(page.getByRole('button', { name: '服認識モデルを準備しています' })).toBeDisabled();
+  await page.unroute('**/vision/manifest.json'); await page.getByRole('button', { name: '服認識モデルを再試行' }).click();
   await expect(page.getByRole('button', { name: '撮影を開始', exact: true })).toBeEnabled({ timeout: 60000 });
 });
 
-test('real person photograph uses real Pose Landmarker; photocomposite backgrounds keep sticker coordinates', async ({ page }) => {
+test('real person photograph uses real clothes segmentation; photocomposite backgrounds keep sticker coordinates', async ({ page }) => {
   await page.goto('/dev');
   const { readFile, mkdir, writeFile } = await import('node:fs/promises');
   const original = (await readFile('private-fixtures/reference-pose.jpg')).toString('base64');
@@ -151,7 +148,7 @@ test('real person photograph uses real Pose Landmarker; photocomposite backgroun
     const image = new Image(); image.src = `data:image/jpeg;base64,${encoded}`; await image.decode();
     const full=document.createElement('canvas'); full.width=image.width; full.height=image.height; full.getContext('2d')!.drawImage(image,0,0);
     const sourceObservation=await inferPerson(resizeForAnalysis(full));
-    if(!sourceObservation || sourceObservation.personCount!==1) throw new Error('Real reference person was not recognized');
+    if(!sourceObservation || !sourceObservation.clothes) throw new Error('Real reference person was not recognized');
     const originalAnalysis=await analyzeCanvas(full);
     const outcomes=[];
     for(const background of ['original','white','black','furniture','pattern','window']) for(const stickers of [0,1,2]) {
@@ -170,14 +167,13 @@ test('real person photograph uses real Pose Landmarker; photocomposite backgroun
       const start=performance.now(),analysis=await analyzeCanvas(c);
       outcomes.push({background,stickers,status:analysis.status,reason:analysis.reason,count:analysis.boxes.length,roiSource:analysis.roiSource,maskCoverage:analysis.maskCoverage,boxes:analysis.boxes,elapsedMs:performance.now()-start});
     }
-    return {kind:'real photograph with digitally composited backgrounds and stickers, not physical acceptance trials', knownExistingObject:'white necklace/pendant visible on the original dark sports shirt; one existing candidate',original:{status:originalAnalysis.status,roiSource:originalAnalysis.roiSource,maskCoverage:originalAnalysis.maskCoverage,boxes:originalAnalysis.boxes},outcomes};
+    return {kind:'real photograph with digitally composited backgrounds and stickers, not physical acceptance trials', knownExistingObject:'white necklace/pendant visible on original shirt; thin low-fill components excluded by compact attachment filter',original:{status:originalAnalysis.status,roiSource:originalAnalysis.roiSource,maskCoverage:originalAnalysis.maskCoverage,boxes:originalAnalysis.boxes},outcomes};
   }, original);
   await mkdir('validation-results',{recursive:true});await writeFile('validation-results/reference-person.json',JSON.stringify(report,null,2));
-  expect(report.original.roiSource).toBe('pose');expect(report.original.maskCoverage).toBeGreaterThan(.6);
+  expect(report.original.roiSource).toBe('clothes');expect(report.original.maskCoverage).toBeGreaterThan(.3);
   for (const outcome of report.outcomes) {
     expect(outcome.status, `${outcome.background} / ${outcome.stickers}: ${outcome.reason}`).toBe('ok');
-    expect(outcome.count, `${outcome.background} / ${outcome.stickers}; original necklace remains`).toBe(1 + outcome.stickers);
-    expect(outcome.boxes.some((b: { x: number; y: number }) => Math.abs(b.x - 211) < 3 && Math.abs(b.y - 216) < 3)).toBe(true);
+    expect(outcome.count, `${outcome.background} / ${outcome.stickers}; compact patches only`).toBe(outcome.stickers);
     if(outcome.stickers >= 1) expect(outcome.boxes.some((b: { x: number; y: number }) => Math.abs(b.x - 235) < 2 && Math.abs(b.y - 270) < 2)).toBe(true);
     if(outcome.stickers >= 2) expect(outcome.boxes.some((b: { x: number; y: number }) => Math.abs(b.x - 230) < 2 && Math.abs(b.y - 340) < 2)).toBe(true);
   }
@@ -203,4 +199,39 @@ test('single-frame and secondary-frame candidates keep actual image coordinates'
   expect(fusion.separate.additionalViews).toHaveLength(1);
   const coordinates = [fusion.separate.analysis.boxes[0].x, fusion.separate.additionalViews![0].analysis.boxes[0].x].sort((a,b)=>a-b);
   expect(coordinates).toEqual([180,270]); expect(fusion.separate.image).not.toBe(fusion.separate.additionalViews![0].image);
+});
+
+test('real garment segmentation survives recolored plain clothing and light/dark/colored patches', async ({ page }) => {
+  await page.goto('/dev');
+  const { readFile, mkdir, writeFile } = await import('node:fs/promises');
+  const report = await page.evaluate(async encoded => {
+    // @ts-expect-error Actual Vite module loaded in browser.
+    const { inferPerson } = await import('/src/vision/model.ts');
+    // @ts-expect-error Actual Vite module loaded in browser.
+    const { resizeForAnalysis, analyzeCanvas } = await import('/src/vision/frames.ts');
+    const image=new Image();image.src='data:image/jpeg;base64,'+encoded;await image.decode();
+    const original=document.createElement('canvas');original.width=480;original.height=494;original.getContext('2d')!.drawImage(image,330,195,340,350,0,0,480,494);
+    const source=await inferPerson(resizeForAnalysis(original));if(!source)throw new Error('No reference garment');
+    const outcomes=[];
+    for(const variant of [{name:'white / black',fabric:[230,230,230],item:'#222'}, {name:'gray / red',fabric:[130,130,130],item:'#ed373c'}, {name:'navy / white',fabric:[25,35,80],item:'#fafafa'}])for(const attached of [false,true]) {
+      const c=document.createElement('canvas');c.width=480;c.height=494;const ctx=c.getContext('2d')!;ctx.drawImage(original,0,0);
+      const pixels=ctx.getImageData(0,0,480,494),m=source.clothes;
+      for(let y=0;y<494;y++)for(let x=0;x<480;x++){
+        const confidence=m.data[Math.min(m.height-1,Math.floor(y*m.height/494))*m.width+Math.min(m.width-1,Math.floor(x*m.width/480))];
+        if(confidence<.65)continue;
+        const p=(y*480+x)*4,lum=pixels.data[p]*.2126+pixels.data[p+1]*.7152+pixels.data[p+2]*.0722;
+        for(let channel=0;channel<3;channel++)pixels.data[p+channel]=Math.max(0,Math.min(255,variant.fabric[channel]+(lum-70)*.18));
+      }
+      ctx.putImageData(pixels,0,0);if(attached){ctx.fillStyle=variant.item;ctx.fillRect(235,270,10,10);}
+      const start=performance.now(),analysis=await analyzeCanvas(c);
+      outcomes.push({variant:variant.name,attached,status:analysis.status,reason:analysis.reason,roiSource:analysis.roiSource,boxes:analysis.boxes,elapsedMs:performance.now()-start});
+    }
+    return {kind:'one real photograph with digitally recolored garments and composited patches; not physical accuracy',outcomes};
+  },(await readFile('private-fixtures/reference-pose.jpg')).toString('base64'));
+  await mkdir('validation-results',{recursive:true});await writeFile('validation-results/plain-clothing-reference.json',JSON.stringify(report,null,2));
+  for(const result of report.outcomes){
+    expect(result.roiSource,result.variant).toBe('clothes');expect(result.status,`${result.variant}: ${result.reason}`).toBe('ok');
+    expect(result.boxes.length,`${result.variant} / ${result.attached}`).toBe(result.attached?1:0);
+    if(result.attached)expect(result.boxes[0]).toMatchObject({x:235,y:270,width:10,height:10});
+  }
 });

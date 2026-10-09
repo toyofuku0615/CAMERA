@@ -1,18 +1,18 @@
-import { FilesetResolver, PoseLandmarker } from '@mediapipe/tasks-vision';
+import { FilesetResolver, ImageSegmenter } from '@mediapipe/tasks-vision';
 import { PERSON_MODEL } from '../config';
 import type { PersonObservation } from './person';
-let instance: PoseLandmarker | null = null;
-let pending: Promise<PoseLandmarker> | null = null;
+let instance: ImageSegmenter | null = null;
+let pending: Promise<ImageSegmenter> | null = null;
 let epoch = 0;
 let loadingAbort: AbortController | null = null;
 export function disposePersonModel() { epoch++; loadingAbort?.abort(); loadingAbort = null; pending = null; instance?.close(); instance = null; }
-export class ModelLoadError extends Error { constructor(message = '人物認識モデルを読み込めませんでした。接続を確認し、モデルを再試行してください。') { super(message); this.name = 'ModelLoadError'; } }
-export function loadPersonModel(): Promise<PoseLandmarker> {
+export class ModelLoadError extends Error { constructor(message = '服認識モデルを読み込めませんでした。接続を確認し、モデルを再試行してください。') { super(message); this.name = 'ModelLoadError'; } }
+export function loadPersonModel(): Promise<ImageSegmenter> {
   if (instance) return Promise.resolve(instance);
   if (pending) return pending;
   const token = ++epoch, abort = new AbortController(); loadingAbort = abort;
   let timer: ReturnType<typeof setTimeout>;
-  const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => { abort.abort(); reject(new ModelLoadError('人物認識モデルの読み込みがタイムアウトしました。接続を確認して再試行してください。')); }, PERSON_MODEL.loadTimeoutMs); });
+  const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => { abort.abort(); reject(new ModelLoadError('服認識モデルの読み込みがタイムアウトしました。接続を確認して再試行してください。')); }, PERSON_MODEL.loadTimeoutMs); });
   const initialization = (async () => {
     try {
       const manifestResponse = await fetch('/vision/manifest.json', { signal: abort.signal });
@@ -23,14 +23,14 @@ export function loadPersonModel(): Promise<PoseLandmarker> {
       if (!response.ok) throw new ModelLoadError();
       const bytes = await response.arrayBuffer();
       const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), b => b.toString(16).padStart(2, '0')).join('');
-      if (hash !== manifest.sha256) throw new ModelLoadError('人物認識モデルの整合性を確認できませんでした。再読み込みしてください。');
+      if (hash !== manifest.sha256) throw new ModelLoadError('服認識モデルの整合性を確認できませんでした。再読み込みしてください。');
       const files = await FilesetResolver.forVisionTasks(PERSON_MODEL.wasmPath);
-      const model = await PoseLandmarker.createFromOptions(files, {
+      const model = await ImageSegmenter.createFromOptions(files, {
         baseOptions: { modelAssetBuffer: new Uint8Array(bytes), delegate: 'CPU' },
-        runningMode: 'IMAGE', numPoses: 2, outputSegmentationMasks: true,
-        minPoseDetectionConfidence: .5, minPosePresenceConfidence: .5,
+        runningMode: 'IMAGE', outputConfidenceMasks: true, outputCategoryMask: false,
       });
       if (abort.signal.aborted || token !== epoch) { model.close(); throw new ModelLoadError(); }
+      if (model.getLabels().join(',') !== 'background,hair,body-skin,face-skin,clothes,others') { model.close(); throw new ModelLoadError('服認識モデルのラベルを確認できませんでした。'); }
       instance = model; return model;
     } catch (error) { throw error instanceof ModelLoadError ? error : new ModelLoadError(); }
     finally { /* The deadline is managed by the outer promise. */ }
@@ -40,14 +40,20 @@ export function loadPersonModel(): Promise<PoseLandmarker> {
 }
 export async function inferPerson(canvas: HTMLCanvasElement): Promise<PersonObservation | null> {
   const model = await loadPersonModel();
-  let result: ReturnType<PoseLandmarker['detect']> | undefined;
+  let result: ReturnType<ImageSegmenter['segment']> | undefined;
   try {
-    result = model.detect(canvas);
-    const mask = result.segmentationMasks?.[0];
-    if (!mask || !result.landmarks.length) return null;
-    return { landmarks: result.landmarks[0], personCount: result.landmarks.length, mask: { width: mask.width, height: mask.height, data: new Float32Array(mask.getAsFloat32Array()) } };
+    result = model.segment(canvas);
+    const masks = result.confidenceMasks;
+    if (!masks || masks.length !== 6) return null;
+    const width = masks[0].width, height = masks[0].height;
+    const background = masks[0].getAsFloat32Array(), clothes = new Float32Array(masks[4].getAsFloat32Array());
+    const body = masks[2].getAsFloat32Array(), face = masks[3].getAsFloat32Array();
+    const foreground = new Float32Array(width * height), skin = new Float32Array(width * height);
+    for (let p = 0; p < foreground.length; p++) { foreground[p] = 1 - background[p]; skin[p] = Math.max(body[p], face[p]); }
+    // Garment segmentation is independent of shoulder/hip or full-body pose detection.
+    return { mask: { width, height, data: foreground }, clothes: { width, height, data: clothes }, skin: { width, height, data: skin } };
   } catch {
     if (instance === model) { instance = null; model.close(); }
-    throw new ModelLoadError('人物認識を実行できませんでした。モデルを再試行し、明るい場所で再撮影してください。');
+    throw new ModelLoadError('服認識を実行できませんでした。モデルを再試行し、明るい場所で再撮影してください。');
   } finally { result?.close(); }
 }
