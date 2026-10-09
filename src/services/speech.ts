@@ -1,10 +1,10 @@
 export class VoiceGuide {
   enabled = true;
   private available = typeof window !== 'undefined' && 'speechSynthesis' in window;
-  unlock() {
+  unlock(text = '撮影の準備をします') {
     if (!this.enabled || !this.available) return;
     // Called synchronously from the user's Start tap (Safari's gesture requirement).
-    this.say('撮影の準備をします');
+    this.say(text);
   }
   say(text: string, maxDuration = 2200) {
     if (!this.enabled || !this.available) return;
