@@ -8,9 +8,14 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0",
     "test": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "node scripts/prepare-test-fixtures.mjs && playwright test",
+    "prepare:vision": "node scripts/prepare-vision.mjs",
+    "predev": "npm run prepare:vision",
+    "prebuild": "npm run prepare:vision",
+    "test:photos": "node scripts/evaluate-photos.mjs"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "0.10.32",
     "lucide-react": "^0.468.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
