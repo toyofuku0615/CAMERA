@@ -1,0 +1,7 @@
+{
+  "runtimeVersion": "0.10.32",
+  "modelVersion": "selfie_multiclass_256x256/float32/1",
+  "modelFile": "selfie_multiclass_256x256-float32-1.tflite",
+  "modelUrl": "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/1/selfie_multiclass_256x256.tflite",
+  "sha256": "c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0"
+}

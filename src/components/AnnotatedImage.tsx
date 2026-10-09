@@ -1,12 +1,14 @@
 import { useState } from 'react';
 import { Maximize2, X } from 'lucide-react';
 import type { CheckResult } from '../vision/frames';
-export function AnnotatedImage({ result, debug = false }: { result: CheckResult; debug?: boolean }) {
+export function AnnotatedImage({ result, debug = false, maskImage, showCandidates = false }: { result: CheckResult; debug?: boolean; maskImage?: string; showCandidates?: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const picture = <div className="annotated" style={{ aspectRatio: `${result.width}/${result.height}` }}>
     <img src={result.image} alt="撮影画像。オレンジの枠は確認が必要な箇所です。" />
+    {debug && maskImage && <img className="mask-overlay" src={maskImage} alt="推定した人物マスクと胴体領域"/>}
     <svg viewBox={`0 0 ${result.width} ${result.height}`} aria-label={`${result.analysis.boxes.length}件の検出枠`}>
-      {debug && <><rect className="debug-region" {...result.analysis.region} /><rect className="debug-cloth" {...result.analysis.clothBounds} /></>}
+      {debug && <><rect className="debug-region" {...result.analysis.region} /><polygon className="debug-cloth" points={result.analysis.torso.map(p => `${p.x},${p.y}`).join(" ")} /></>}
+      {debug && showCandidates && result.analysis.candidates.map((c, i) => <rect key={`candidate-${i}`} className={c.accepted ? "candidate-accepted" : "candidate-rejected"} x={c.box.x} y={c.box.y} width={c.box.width} height={c.box.height}><title>{c.reason}</title></rect>)}
       {result.analysis.boxes.map((b, i) => <g key={i}><rect className="detection-box" x={b.x - 4} y={b.y - 4} width={b.width + 8} height={b.height + 8} /><rect x={b.x - 4} y={Math.max(0, b.y - 26)} width="25" height="22" rx="3" fill="#ce713d"/><text x={b.x + 8} y={Math.max(16, b.y - 10)} textAnchor="middle" fill="white" fontSize="16">{i + 1}</text></g>)}
     </svg>
   </div>;
