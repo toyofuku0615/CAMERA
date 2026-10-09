@@ -130,7 +130,7 @@ PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium npm run test:photos
 
 Netlifyはリポジトリ接続後 `netlify.toml` を使用（Node24、`npm ci && npm run build`、公開先dist）。VercelはリポジトリをViteプロジェクトとして接続し `vercel.json` を使用。Root Directoryはリポジトリ直下。ビルド環境のGoogleモデル配布元への通信が必要です。CSPに `wasm-unsafe-eval` を追加し、画像は自サイト・data/blobのみ、通信は自サイトのみ、カメラ以外の権限は無効化しています。
 
-公開後、発行された実際のHTTPS URLをiPhone Safariで開き、まずライブの初回枠・音声・移動と除去・一時停止と再開を確認してください。4方向撮影も別途確認してください。本作業ではホスティングへのデプロイは行っていません。
+公開後、発行された実際のHTTPS URLをiPhone Safariで開き、まずライブの初回枠・音声・移動と除去・一時停止と再開を確認してください。4方向撮影も別途確認してください。本作業ではホスティングへの手動デプロイは行っていません。GitHub連携によるプレビューは別途自動生成されます。
 
 ## 制約
 
