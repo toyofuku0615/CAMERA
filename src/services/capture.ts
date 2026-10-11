@@ -6,7 +6,7 @@ export interface Shot { direction: Direction; frames: HTMLCanvasElement[]; error
 export function wait(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) return reject(new DOMException('中止', 'AbortError'));
-    const onAbort = () => { clearTimeout(timer); reject(new DOMException('中止', 'AbortError')); };
+    const onAbort = () => { clearTimeout(timer); signal.removeEventListener('abort', onAbort); reject(new DOMException('中止', 'AbortError')); };
     const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve(); }, ms);
     signal.addEventListener('abort', onAbort, { once: true });
   });
@@ -37,6 +37,7 @@ export async function captureSequence(video: HTMLVideoElement, voice: VoiceGuide
       }
       onShot({ direction: direction.id, frames });
     } catch (error) {
+      frames.forEach(c => { c.width = c.height = 0; });
       if (signal.aborted) throw error;
       onShot({ direction: direction.id, frames: [], error: error instanceof Error ? error.message : '撮影できませんでした。' });
     }

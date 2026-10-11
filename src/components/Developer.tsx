@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { APP, DETECTION, type DetectionSettings } from '../config';
+import { DETECTION, type DetectionSettings } from '../config';
 import { analyzeCanvas, type CheckResult } from '../vision/frames';
 import { AnnotatedImage } from './AnnotatedImage';
 export function Developer() {
@@ -31,7 +31,7 @@ export function Developer() {
     } catch { setError('画像を読み込めませんでした。JPEGまたはPNGを選択してください。'); }
     finally { URL.revokeObjectURL(url); }
   }
-  return <main className="developer"><span className="eyebrow">{APP.name} / DEVELOPMENT ONLY</span><h1>画像検証</h1><p>端末内で解析します。青：ガイド範囲、緑：推定した黒い生地の外接範囲。輪郭推定はガイドに基づく代替方式です。</p><label className="upload">静止画像を選択<input type="file" accept="image/*" onChange={e => void load(e.target.files?.[0])}/></label>{error && <p role="alert">{error}</p>}
+  return <main className="developer"><span className="eyebrow">CAMERA / DEVELOPMENT ONLY</span><h1>画素検出の調整</h1><p>この開発用画面はガイド内の画素検出だけを調整します。人物・向きの判定や正常判定は行いません。青：解析範囲、黄：暗い領域。本番のカメラ画面は人物モデルと組み合わせて解析します。</p><label className="upload">静止画像を選択<input type="file" accept="image/*" onChange={e => void load(e.target.files?.[0])}/></label>{error && <p role="alert">{error}</p>}
     <div className="dev-grid"><section>{controls.map(c => <label className="slider" key={c.key} htmlFor={`setting-${c.key}`}>{c.label}<output>{settings[c.key]}</output><input id={`setting-${c.key}`} aria-label={c.label} type="range" min={c.min} max={c.max} step={c.step} value={settings[c.key]} onChange={e => setSettings(s => ({ ...s, [c.key]: Number(e.target.value) }))}/></label>)}<button className="secondary" onClick={() => setSettings({ ...DETECTION })}>設定を戻す</button><p>変更はこの画面だけに反映されます。採用する値は src/config.ts に設定してください。</p><pre>{JSON.stringify(settings, null, 2)}</pre></section>
     <section>{result && <><p role="status">{result.analysis.status === 'ok' ? `候補 ${result.analysis.boxes.length}件` : result.analysis.reason}</p><p>生地割合 {(result.analysis.darkCoverage * 100).toFixed(1)}% / 鮮明度 {result.analysis.sharpness.toFixed(1)}</p><AnnotatedImage result={result} debug/><pre>{JSON.stringify(result.analysis.boxes, null, 2)}</pre></>}</section></div>
   </main>;

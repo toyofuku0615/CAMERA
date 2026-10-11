@@ -1,18 +1,18 @@
 import { CAPTURE } from '../config';
 export async function openCamera(): Promise<MediaStream> {
-  if (!window.isSecureContext) throw new Error('カメラの利用にはHTTPS接続が必要です。');
-  if (!navigator.mediaDevices?.getUserMedia) throw new Error('このブラウザではカメラを使用できません。Safariで開いてください。');
+  if (!window.isSecureContext) throw new Error('HTTPSで開いてください');
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error('Safariで開いてください');
   let expired = false;
   let timer: ReturnType<typeof setTimeout>;
   const request = navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'user', width: { ideal: 720 }, height: { ideal: 960 }, frameRate: { ideal: 24, max: 30 } } });
   request.then(stream => { if (expired) stopCamera(stream); }, () => {});
   try {
-    return await Promise.race([request, new Promise<never>((_, reject) => { timer = setTimeout(() => { expired = true; reject(new Error('カメラの応答がありません。利用許可を確認して再試行してください。')); }, 20000); })]);
+    return await Promise.race([request, new Promise<never>((_, reject) => { timer = setTimeout(() => { expired = true; reject(new Error('カメラの許可を確認して、もう一度')); }, 20000); })]);
   } catch (error) {
     if (error instanceof DOMException) {
-      if (error.name === 'NotAllowedError' || error.name === 'SecurityError') throw new Error('カメラを使用できません。Safariの設定をご確認ください。');
-      if (error.name === 'NotFoundError') throw new Error('カメラが見つかりません。カメラを搭載した端末で開いてください。');
-      if (error.name === 'NotReadableError') throw new Error('カメラを起動できません。他のアプリのカメラを終了し、再試行してください。');
+      if (error.name === 'NotAllowedError' || error.name === 'SecurityError') throw new Error('カメラを許可してください');
+      if (error.name === 'NotFoundError') throw new Error('カメラのある端末で開いてください');
+      if (error.name === 'NotReadableError') throw new Error('ほかのカメラを閉じて、もう一度');
     }
     throw error;
   } finally { clearTimeout(timer!); }
