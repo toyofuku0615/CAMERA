@@ -13,6 +13,18 @@ export function analyze(image: Pixels, settings: DetectionSettings = DETECTION, 
   let x0 = Math.max(1, Math.floor(w * (GUIDE.x + margin))), y0 = Math.max(1, Math.floor(h * (GUIDE.y + margin)));
   let x1 = Math.min(w - 2, Math.ceil(w * (GUIDE.x + GUIDE.width - margin))), y1 = Math.min(h - 2, Math.ceil(h * (GUIDE.y + GUIDE.height - margin)));
   const eligible = (p: number) => !subject || subject.mask[p] === 1;
+  // Exposure varies with the wall behind the person. Adapt only from garment
+  // pixels, leaving the developer's manually configured thresholds unchanged.
+  let darkThreshold = settings.darkThreshold, brightnessThreshold = settings.brightnessThreshold;
+  if (subject) {
+    const histogram = new Uint32Array(256);
+    let count = 0;
+    for (let p = 0; p < luminance.length; p++) if (eligible(p)) { histogram[Math.round(luminance[p])]++; count++; }
+    let cumulative = 0, median = 0;
+    for (; median < 255; median++) { cumulative += histogram[median]; if (cumulative >= count / 2) break; }
+    darkThreshold = Math.max(settings.darkThreshold, Math.min(130, median + 22));
+    brightnessThreshold = Math.max(110, Math.min(settings.brightnessThreshold, median + settings.contrastThreshold));
+  }
   if (subject) {
     x0 = w; y0 = h; x1 = y1 = 0;
     for (let p = 0; p < w * h; p++) if (eligible(p)) {
@@ -20,7 +32,7 @@ export function analyze(image: Pixels, settings: DetectionSettings = DETECTION, 
       x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y);
     }
     x0 = Math.max(1, x0); y0 = Math.max(1, y0); x1 = Math.min(w - 2, x1); y1 = Math.min(h - 2, y1);
-    if (!subject.complete || subject.width !== w || subject.height !== h || x1 <= x0 || y1 <= y0)
+    if (subject.width !== w || subject.height !== h || x1 <= x0 || y1 <= y0)
       return { status: 'uncertain', boxes: [], region: { x: 0, y: 0, width: w, height: h, area: w * h }, darkCoverage: 0, sharpness: 0, reason: subject.reason ?? '全身が映る位置で、もう一度' };
   }
   const region = { x: x0, y: y0, width: x1 - x0, height: y1 - y0, area: (x1 - x0) * (y1 - y0) };
@@ -30,14 +42,14 @@ export function analyze(image: Pixels, settings: DetectionSettings = DETECTION, 
   // Largest connected dark component in the torso guide is a conservative garment proxy.
   for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
     const seed = y * w + x;
-    if (visited[seed] || !eligible(seed) || luminance[seed] > settings.darkThreshold) continue;
+    if (visited[seed] || !eligible(seed) || luminance[seed] > darkThreshold) continue;
     let head = 0, tail = 1; queue[0] = seed; visited[seed] = 1;
     const component: number[] = [];
     while (head < tail) {
       const p = queue[head++], px = p % w, py = Math.floor(p / w); component.push(p);
       for (const [nx, ny] of [[px - 1, py], [px + 1, py], [px, py - 1], [px, py + 1]]) {
         const n = ny * w + nx;
-        if (nx < x0 || nx > x1 || ny < y0 || ny > y1 || visited[n] || !eligible(n) || luminance[n] > settings.darkThreshold) continue;
+        if (nx < x0 || nx > x1 || ny < y0 || ny > y1 || visited[n] || !eligible(n) || luminance[n] > darkThreshold) continue;
         visited[n] = 1; queue[tail++] = n;
       }
     }
@@ -57,9 +69,10 @@ export function analyze(image: Pixels, settings: DetectionSettings = DETECTION, 
     energy += lap * lap; samples++;
   }
   const sharpness = energy / Math.max(1, samples);
-  const result: Analysis = { status: 'ok', boxes: [], region, darkCoverage, sharpness };
+  const result: Analysis = { status: subject && !subject.complete ? 'uncertain' : 'ok', boxes: [], region, darkCoverage, sharpness,
+    reason: subject && !subject.complete ? subject.reason ?? '全身が映る位置で、もう一度' : undefined };
   if (largest.length) result.clothBounds = { x: left, y: top, width: right - left + 1, height: bottom - top + 1, area: largest.length };
-  if (darkCoverage < (subject ? .65 : settings.minDarkCoverage) || (!subject && (bottom - top < region.height * .65 || right - left < region.width * .16))) {
+  if (darkCoverage < (subject ? .35 : settings.minDarkCoverage) || (!subject && (bottom - top < region.height * .65 || right - left < region.width * .16))) {
     return { ...result, status: 'uncertain', reason: subject ? '黒い服を、明るい場所で' : '服の範囲を十分に確認できませんでした。黒いセーターをガイド内に収めてください。' };
   }
   // If garment fills the whole guide, its boundaries cannot be verified: don't certify an empty frame.
@@ -69,7 +82,7 @@ export function analyze(image: Pixels, settings: DetectionSettings = DETECTION, 
   const areaScale = (w / settings.analysisWidth) ** 2;
   for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
     const seed = y * w + x;
-    if (visited[seed] || !eligible(seed) || luminance[seed] < settings.brightnessThreshold) continue;
+    if (visited[seed] || !eligible(seed) || luminance[seed] < brightnessThreshold) continue;
     let head = 0, tail = 1, minX = x, maxX = x, minY = y, maxY = y, sum = 0;
     queue[0] = seed; visited[seed] = 1;
     while (head < tail) {
@@ -77,7 +90,7 @@ export function analyze(image: Pixels, settings: DetectionSettings = DETECTION, 
       minX = Math.min(minX, px); maxX = Math.max(maxX, px); minY = Math.min(minY, py); maxY = Math.max(maxY, py); sum += luminance[p];
       for (const [nx, ny] of [[px - 1, py], [px + 1, py], [px, py - 1], [px, py + 1]]) {
         const n = ny * w + nx;
-        if (nx < x0 || nx > x1 || ny < y0 || ny > y1 || visited[n] || !eligible(n) || luminance[n] < settings.brightnessThreshold) continue;
+        if (nx < x0 || nx > x1 || ny < y0 || ny > y1 || visited[n] || !eligible(n) || luminance[n] < brightnessThreshold) continue;
         visited[n] = 1; queue[tail++] = n;
       }
     }

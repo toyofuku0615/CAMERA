@@ -7,7 +7,7 @@ export interface Subject {
   /** Person probability AND anatomical clothing region, in the analysis pixels. */
   mask: Uint8Array;
   landmarks: NormalizedLandmark[];
-  facing: Direction | 'unknown';
+  facing: Direction | 'profile' | 'unknown';
   complete: boolean;
   reason?: string;
 }
@@ -35,13 +35,18 @@ export function assessPose(points: NormalizedLandmark[]): Pick<Subject, 'facing'
   };
   if (points.length !== 33 || ![11, 12, 23, 24].every(i => visible(i)))
     return { facing: 'unknown', complete: false, reason: '全身が映る位置で、もう一度' };
-  // In profile the far leg can be occluded, but each leg must still have evidence.
-  if (![25, 26, 27, 28, 31, 32].every(i => visible(i, .45)) || !visible(0, .45))
+  // The video includes turning frames, but only actual full-body frames certify
+  // front/back coverage. Occluded hands alone shouldn't reject the whole video.
+  const head = [0, 7, 8].filter(i => visible(i, .35));
+  const feet = [[31, 29], [32, 30]].map(alternatives => alternatives.find(i => visible(i, .35)));
+  if (![25, 26, 27, 28].every(i => visible(i, .45)) || !head.length || feet.some(i => i === undefined))
     return { facing: 'unknown', complete: false, reason: '足元まで映る位置で、もう一度' };
-  if (![15, 16].every(i => visible(i, .4))) return { facing: 'unknown', complete: false, reason: '全身が映る位置で、もう一度' };
-  const body = [0, 11, 12, 15, 16, 23, 24, 25, 26, 27, 28, 31, 32].map(i => points[i]);
+  // Back-facing people can have occluded noses/toes. Actual ears and heels are
+  // valid head/foot evidence, rather than requiring front-only landmarks.
+  const foot = feet as number[];
+  const body = [...head, 11, 12, 23, 24, 25, 26, 27, 28, ...foot, ...[15, 16].filter(i => visible(i, .4))].map(i => points[i]);
   if (body.some(p => p.x < .035 || p.x > .965 || p.y < .025 || p.y > .965) ||
-      Math.max(points[31].y, points[32].y) - points[0].y < .45)
+      Math.max(...foot.map(i => points[i].y)) - Math.min(...head.map(i => points[i].y)) < .45)
     return { facing: 'unknown', complete: false, reason: '全身が映る位置で、もう一度' };
   const [ls, rs, lh, rh] = [points[11], points[12], points[23], points[24]];
   const torso = (lh.y + rh.y - ls.y - rs.y) / 2;
@@ -60,7 +65,10 @@ export function assessFacing(points: NormalizedLandmark[], faces: Detection[], f
   if (torso < .1) return 'unknown';
   const shoulder = (rs.x - ls.x) / torso, hip = (rh.x - lh.x) / torso;
   const depth = Math.abs(rs.z - ls.z) / torso;
-  if (!faces.length) return frontOrder && shoulder * frontOrder < -.4 && hip * frontOrder < -.15 && depth < .85 ? 'back' : 'unknown';
+  if (!faces.length) {
+    if (frontOrder && shoulder * frontOrder < -.4 && hip * frontOrder < -.15 && depth < 1.1) return 'back';
+    return Math.abs(shoulder) < .5 && depth > .6 ? 'profile' : 'unknown';
+  }
   const face = faces[0], p = face.landmarks;
   if (p.length < 6 || p.some(v => !Number.isFinite(v.x) || !Number.isFinite(v.y))) return 'unknown';
   // Require the detected face to belong to this pose, not a passerby or poster.
@@ -68,11 +76,34 @@ export function assessFacing(points: NormalizedLandmark[], faces: Detection[], f
   if (Math.hypot(p[2].x - nose.x, p[2].y - nose.y) > torso * .35) return 'unknown';
   const eyes = Math.abs(p[0].x - p[1].x);
   const deviation = (p[2].x - (p[0].x + p[1].x) / 2) / Math.max(.001, eyes);
-  if (eyes > .012 && Math.abs(deviation) < .3 && Math.abs(shoulder) > .4 && depth < .85) return 'front';
+  if (eyes > .012 && Math.abs(deviation) < .45 && Math.abs(shoulder) > .4 && depth < 1.1) return 'front';
   const offset = (p[2].x - (ls.x + rs.x) / 2) / torso;
   if (Math.abs(shoulder) < .5 && depth > .6 && Math.abs(offset) > .12 && Math.abs(deviation) > .35)
-    return offset < 0 ? 'side1' : 'side2';
+    return 'profile';
   return 'unknown';
+}
+
+/** A white tape patch can become a small hole in person segmentation against a
+ * white wall. Fill only enclosed holes inside the anatomical clothing proxy;
+ * never expand the silhouette into the background. */
+export function fillSmallMaskHoles(mask: Uint8Array, allowed: Uint8Array, w: number, h: number, maxArea: number) {
+  const visited = new Uint8Array(mask.length), queue = new Int32Array(mask.length);
+  for (let seed = 0; seed < mask.length; seed++) {
+    if (mask[seed] || visited[seed]) continue;
+    let head = 0, tail = 1, open = false;
+    queue[0] = seed; visited[seed] = 1;
+    while (head < tail) {
+      const p = queue[head++], x = p % w, y = Math.floor(p / w);
+      if (!allowed[p] || x === 0 || x === w - 1 || y === 0 || y === h - 1) open = true;
+      for (const [nx, ny] of [[x-1,y], [x+1,y], [x,y-1], [x,y+1]]) {
+        if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+        const n = ny * w + nx;
+        if (!mask[n] && !visited[n]) { visited[n] = 1; queue[tail++] = n; }
+      }
+    }
+    if (!open && tail <= maxArea) for (let i = 0; i < tail; i++) mask[queue[i]] = 1;
+  }
+  return mask;
 }
 
 function clothingMask(points: NormalizedLandmark[], person: Uint8ClampedArray, w: number, h: number) {
@@ -96,8 +127,12 @@ function clothingMask(points: NormalizedLandmark[], person: Uint8ClampedArray, w
     }
   }
   const anatomical = ctx.getImageData(0, 0, w, h).data;
-  const mask = new Uint8Array(w * h);
-  for (let i = 0; i < mask.length; i++) mask[i] = anatomical[i * 4 + 3] > 200 && person[i * 4 + 3] > 210 ? 1 : 0;
+  const mask = new Uint8Array(w * h), allowed = new Uint8Array(w * h);
+  for (let i = 0; i < mask.length; i++) {
+    allowed[i] = anatomical[i * 4 + 3] > 200 ? 1 : 0;
+    mask[i] = allowed[i] && person[i * 4 + 3] > 210 ? 1 : 0;
+  }
+  fillSmallMaskHoles(mask, allowed, w, h, Math.round(w * h * .006));
   c.width = c.height = 0;
   return mask;
 }
@@ -108,8 +143,8 @@ export async function createInspector(): Promise<Inspector> {
   const pose = new PoseConstructor({ locateFile: file => `${import.meta.env.BASE_URL}vision/${file}` });
   const FaceConstructor = (window as unknown as { FaceDetection: typeof FaceDetection }).FaceDetection;
   const face = new FaceConstructor({ locateFile: file => `${import.meta.env.BASE_URL}vision/${file}` });
-  face.setOptions({ selfieMode: false, model: 'full', minDetectionConfidence: .7 });
-  pose.setOptions({ modelComplexity: 0, selfieMode: false, smoothLandmarks: false, enableSegmentation: true, smoothSegmentation: false, minDetectionConfidence: .65, minTrackingConfidence: .65 });
+  face.setOptions({ selfieMode: false, model: 'full', minDetectionConfidence: .55 });
+  pose.setOptions({ modelComplexity: 0, selfieMode: false, smoothLandmarks: false, enableSegmentation: true, smoothSegmentation: false, minDetectionConfidence: .5, minTrackingConfidence: .5 });
   try { await pose.initialize(); await face.initialize(); } catch (e) { await Promise.allSettled([pose.close(), face.close()]); throw e; }
   let result: Subject | undefined;
   let size = { width: 0, height: 0 };

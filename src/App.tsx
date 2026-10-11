@@ -1,15 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { DIRECTIONS, type Direction } from './config';
 import { openCamera, stopCamera } from './services/camera';
-import { captureSequence, type Progress, type Shot } from './services/capture';
+import { captureSequence, type Progress, type Recording } from './services/capture';
 import { VoiceGuide } from './services/speech';
-import { canSendOff, inspectShot, type CheckResult } from './vision/frames';
+import { canSendOff, inspectVideo, type Finding } from './vision/frames';
 import { createInspector, type Inspector } from './vision/subject';
 import { AnnotatedImage } from './components/AnnotatedImage';
 
 type Screen = 'camera' | 'capture' | 'analyze' | 'findings' | 'incomplete' | 'sendoff';
-const directionName = (direction: Direction) => direction === 'back' ? '背中' : DIRECTIONS.find(d => d.id === direction)!.label;
-const dispose = (shots: Shot[]) => shots.forEach(s => { s.frames.forEach(c => { c.width = c.height = 0; }); s.frames = []; });
+const directionName = (direction: Finding['direction']) => direction === 'back' ? '背中' : direction === 'front' ? '正面' : '服';
 
 export function App() {
   const [screen, setScreen] = useState<Screen>('camera');
@@ -17,7 +15,7 @@ export function App() {
   const [ready, setReady] = useState(false), [loading, setLoading] = useState(false);
   const [message, setMessage] = useState('');
   const [progress, setProgress] = useState<Progress>();
-  const [results, setResults] = useState<CheckResult[]>([]), [selected, setSelected] = useState(0);
+  const [findings, setFindings] = useState<Finding[]>([]), [selected, setSelected] = useState(0);
   const video = useRef<HTMLVideoElement>(null), liveStream = useRef<MediaStream | null>(null);
   const generation = useRef(0), controller = useRef<AbortController | null>(null);
   const voice = useRef(new VoiceGuide()), screenRef = useRef(screen);
@@ -35,7 +33,7 @@ export function App() {
   async function startCamera() {
     if (document.hidden) return;
     cancelWork(); releaseCamera(); setLoading(true); setMessage('');
-    setResults([]); setSelected(0); setProgress(undefined); setScreen('camera');
+    setFindings([]); setSelected(0); setProgress(undefined); setScreen('camera');
     const token = generation.current;
     try {
       const s = await openCamera();
@@ -55,7 +53,7 @@ export function App() {
     const initial = setTimeout(() => { void startCamera(); }, 0);
     const suspend = (event: Event) => {
       if (!document.hidden && event.type !== 'pagehide') return;
-      cancelWork(); releaseCamera(); setLoading(false); setResults([]);
+      cancelWork(); releaseCamera(); setLoading(false); setFindings([]);
       setProgress(undefined); setScreen('camera'); setMessage('中断しました。もう一度');
     };
     document.addEventListener('visibilitychange', suspend); window.addEventListener('pagehide', suspend);
@@ -77,7 +75,7 @@ export function App() {
     return () => clearTimeout(timer);
   }, [screen]);
   function interrupt() {
-    cancelWork(); releaseCamera(); setProgress(undefined); setResults([]); setLoading(false);
+    cancelWork(); releaseCamera(); setProgress(undefined); setFindings([]); setLoading(false);
     setScreen('camera'); setMessage('中断しました。もう一度');
   }
   async function record() {
@@ -85,43 +83,35 @@ export function App() {
     voice.current.unlock();
     const abort = new AbortController(); controller.current = abort;
     const token = ++generation.current;
-    setResults([]); setMessage(''); setProgress(undefined); setScreen('capture');
-    const shots: Shot[] = [];
+    setFindings([]); setMessage(''); setProgress(undefined); setScreen('capture');
+    let recording: Recording | undefined;
     let inspector: Inspector | undefined;
     let analysisTimer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await captureSequence(video.current, voice.current, abort.signal, setProgress, shot => shots.push(shot));
+      recording = await captureSequence(video.current, voice.current, abort.signal, setProgress);
       if (token !== generation.current) return;
       releaseCamera(); setScreen('analyze'); voice.current.cancel();
       analysisTimer = setTimeout(() => {
         if (token !== generation.current) return;
-        cancelWork(); setResults([]); setScreen('incomplete'); setMessage('解析できませんでした。もう一度');
-      }, 45000);
+        cancelWork(); setFindings([]); setScreen('incomplete'); setMessage('解析できませんでした。もう一度');
+      }, 150000);
       inspector = await createInspector();
-      const checked: CheckResult[] = [];
-      for (const shot of shots) {
-        if (token !== generation.current) return;
-        checked.push(await inspectShot(shot, inspector, abort.signal));
-        dispose([shot]);
-        await new Promise(resolve => setTimeout(resolve, 0));
-      }
+      const report = await inspectVideo(recording, inspector, abort.signal);
       if (token !== generation.current) return;
-      setSelected(0);
-      const incomplete = checked.find(r => r.analysis.status !== 'ok' || !r.facingVerified);
-      setMessage(incomplete ? incomplete.analysis.reason ?? `${directionName(incomplete.direction)}を確認できませんでした` : '');
-      if (checked.some(r => r.findings?.length)) { setResults(checked); setScreen('findings'); }
-      else if (canSendOff(checked)) { setResults([]); setScreen('sendoff'); }
-      else { setResults([]); setScreen('incomplete'); }
-    } catch {
+      setSelected(0); setMessage(report.reason ?? '');
+      if (report.findings.length) { setFindings(report.findings); setScreen('findings'); }
+      else if (report.complete && canSendOff(report.checks)) { setFindings([]); setScreen('sendoff'); }
+      else { setFindings([]); setScreen('incomplete'); }
+    } catch (error) {
       if (token === generation.current && !abort.signal.aborted) {
-        releaseCamera(); setResults([]); setScreen('incomplete'); setMessage('解析できませんでした。もう一度');
+        releaseCamera(); setFindings([]); setScreen('incomplete');
+        setMessage(!recording && error instanceof Error && error.message.length < 60 ? error.message : '解析できませんでした。もう一度');
       }
     } finally {
-      clearTimeout(analysisTimer); dispose(shots);
+      clearTimeout(analysisTimer); recording = undefined;
       await inspector?.close().catch(() => {});
     }
   }
-  const findings = results.flatMap(r => (r.findings ?? []).map(f => ({ ...f, direction: r.direction })));
   const active = findings[selected];
   const move = (delta: number) => setSelected(i => Math.max(0, Math.min(findings.length - 1, i + delta)));
   const cameraScreen = screen === 'camera' || screen === 'capture';
@@ -136,7 +126,7 @@ export function App() {
       </div>}
       {screen === 'capture' && <div className="capture-cue" role="status" aria-live="polite">
         <p>{progress?.preparing ? '少し離れて、全身を画面に' : progress?.instruction ?? '撮影を始めます'}</p>
-        <span role="timer" aria-label={progress?.countdown ? `あと${progress.countdown}秒` : 'ゆっくり回ってください'}>{progress?.countdown ?? '\u00a0'}</span>
+        <span role="timer" aria-label={progress?.countdown ? `あと${progress.countdown}秒` : progress?.instruction ?? '撮影中'}>{progress?.countdown ?? '\u00a0'}</span>
       </div>}
       <div className="camera-controls"><button className={`record-button ${screen === 'capture' ? 'recording' : ''}`}
         aria-label={screen === 'capture' ? '撮影を中止' : '録画開始'} disabled={screen === 'camera' && (!ready || loading)}
@@ -152,7 +142,7 @@ export function App() {
           const start = gesture.current; gesture.current = null;
           if (start && Math.abs(e.clientX - start.x) > 45 && Math.abs(e.clientY - start.y) < 60) { swiped.current = true; move(e.clientX < start.x ? 1 : -1); }
         }} onKeyDown={e => { if (e.key === 'ArrowRight') move(1); if (e.key === 'ArrowLeft') move(-1); }}>
-        <AnnotatedImage key={`${active.direction}-${selected}`} result={{ direction: active.direction, image: active.image, width: active.width, height: active.height,
+        <AnnotatedImage key={`${active.direction}-${selected}`} result={{ image: active.image, width: active.width, height: active.height,
           analysis: { status: 'ok', boxes: [active.box], region: active.box, darkCoverage: 0, sharpness: 0 } }} />
       </div>
       <div className="finding-caption" aria-live="polite"><p>{directionName(active.direction)}の付着物候補</p>

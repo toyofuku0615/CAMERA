@@ -1,23 +1,33 @@
 import { expect, test, type Page } from '@playwright/test';
 import { readFile, writeFile } from 'node:fs/promises';
 
-// Synthetic LIVE pixels still pass through captureFrame, segmentation-aware pixel
-// detection, temporal association, JPEG extraction and SVG rendering. Only model
+// Synthetic LIVE pixels are encoded by the REAL MediaRecorder, decoded from
+// the resulting video Blob, then inspected, deduplicated and drawn as JPEG/SVG. Only model
 // evidence is mocked in the UI scenarios; the real models are tested separately.
-async function syntheticCamera(page: Page, marked = true) {
+async function syntheticCamera(page: Page, marked: boolean | 'brief' = true) {
   await page.addInitScript((marked) => {
-    const state = window as typeof window & { testSticker: boolean; testInvalid: boolean; testWrongFacing: boolean; testModelFails: boolean; testStreams: MediaStream[] };
+    const state = window as typeof window & { testSticker: boolean | 'brief'; testInvalid: boolean; testWrongFacing: boolean; testModelFails: boolean; testStreams: MediaStream[] };
     state.testSticker = marked; state.testInvalid = false; state.testWrongFacing = false; state.testModelFails = false; state.testStreams = [];
+    const Recorder = window.MediaRecorder;
+    const observed = window as typeof window & { testRecorders: MediaRecorder[]; testBlobUrls: string[]; testRevokedUrls: string[]; testDropRecordingData: boolean };
+    observed.testRecorders = []; observed.testBlobUrls = []; observed.testRevokedUrls = [];
+    window.MediaRecorder = class extends Recorder {
+      constructor(stream: MediaStream, options?: MediaRecorderOptions) { super(stream, options); observed.testRecorders.push(this); if(observed.testDropRecordingData)this.addEventListener('dataavailable', e=>e.stopImmediatePropagation()); }
+    };
+    const originalCreate = URL.createObjectURL.bind(URL), originalRevoke = URL.revokeObjectURL.bind(URL);
+    URL.createObjectURL = blob => { const url = originalCreate(blob); if(blob instanceof Blob && blob.type.startsWith('video/')) observed.testBlobUrls.push(url); return url; };
+    URL.revokeObjectURL = url => { observed.testRevokedUrls.push(url); originalRevoke(url); };
     Object.defineProperty(navigator.mediaDevices, 'getUserMedia', { value: async () => {
       const c = document.createElement('canvas'); c.width = 480; c.height = 640;
       const ctx = c.getContext('2d')!;
+      const opened = performance.now();
       const draw = () => {
         ctx.fillStyle = '#e2e2e2'; ctx.fillRect(0, 0, 480, 640);
         ctx.fillStyle = '#181a18'; ctx.fillRect(150, 165, 180, 345);
         // Real focus evidence in the garment itself; a flat rectangle alone must
         // not be certified using the sharp white wall in its background.
         ctx.fillStyle = '#212321'; for (let y = 168; y < 510; y += 4) ctx.fillRect(150, y, 180, 1);
-        if (state.testSticker) { ctx.fillStyle = '#fafafa'; ctx.fillRect(210, 300, 14, 16); ctx.fillRect(270, 400, 12, 12); }
+        if (state.testSticker && (state.testSticker !== 'brief' || (performance.now()-opened > 4500 && performance.now()-opened < 6200))) { ctx.fillStyle = '#fafafa'; ctx.fillRect(210, 300, 14, 16); ctx.fillRect(270, 400, 12, 12); }
       };
       draw(); const interval = setInterval(draw, 50); const stream = c.captureStream(20);
       stream.getTracks()[0].addEventListener('ended', () => clearInterval(interval)); state.testStreams.push(stream); return stream;
@@ -30,10 +40,11 @@ async function modelEvidence(page: Page) {
       let index = 0;
       return { async inspect(canvas) {
         if (window.testModelFails) throw new Error('synthetic model failure');
+        if(window.testSlowModel)await new Promise(resolve=>setTimeout(resolve,2000));
         const mask = new Uint8Array(canvas.width * canvas.height);
         for(let y=165;y<510;y++)for(let x=150;x<330;x++)mask[y*canvas.width+x]=1;
         return { width:canvas.width, height:canvas.height, mask, landmarks:[], complete:!window.testInvalid,
-          facing:window.testWrongFacing?'front':['front','side1','back','side2'][Math.floor(index++ / 4)],
+          facing:window.testWrongFacing?'front':(index++ < 12 ? 'front' : index <= 24 ? 'profile' : 'back'),
           reason:window.testInvalid?'全身が映る位置で、もう一度':undefined };
       }, async close() {} };
     }` }));
@@ -60,14 +71,19 @@ test('launch opens only the live front preview and record control, no external r
   expect(errors).toEqual([]); expect(external).toEqual([]);
 });
 
-test('extracts eight unique findings from sixteen real frames; mirrored ring, swipe, zoom, recapture', async ({ page }) => {
+test('records a real movie, extracts four deduplicated screenshots; mirrored ring, swipe, zoom, recapture', async ({ page }) => {
   await syntheticCamera(page); await modelEvidence(page); await record(page);
   await expect(page.getByText('正面の付着物候補')).toBeVisible({ timeout: 45000 });
-  await expect(page.getByText('1 / 8', { exact: true })).toBeVisible();
+  await expect(page.getByText('1 / 4', { exact: true })).toBeVisible();
   const ring = page.locator('.finding-photo .detection-ring');
-  await expect(ring).toHaveCount(1); expect(Number(await ring.getAttribute('cx'))).toBe(263);
-  expect(Number(await ring.getAttribute('cy'))).toBe(308);
+  await expect(ring).toHaveCount(1); expect(Number(await ring.getAttribute('cx'))).toBeCloseTo(263, 0);
+  expect(Number(await ring.getAttribute('cy'))).toBeCloseTo(308, 0);
   expect(await streamsStopped(page)).toBe(true);
+  const movie = await page.evaluate(() => {
+    const w=window as typeof window & { testRecorders: MediaRecorder[]; testBlobUrls:string[];testRevokedUrls:string[] };
+    return {recorders:w.testRecorders.length, state:w.testRecorders[0].state, mime:w.testRecorders[0].mimeType, urls:w.testBlobUrls.length, revoked:w.testRevokedUrls};
+  });
+  expect(movie).toMatchObject({recorders:1,state:'inactive',urls:1}); expect(movie.mime).toMatch(/^video\//);expect(movie.revoked).toHaveLength(1);
   const img = page.locator('.finding-photo img'); expect(await img.getAttribute('src')).toMatch(/^data:image\/jpeg/);
   // Both image and SVG use contain with the same origin, dimensions and viewBox.
   const aligned = await page.evaluate(() => {
@@ -80,8 +96,8 @@ test('extracts eight unique findings from sixteen real frames; mirrored ring, sw
   const bounds = await page.locator('.finding-photo').boundingBox();
   await page.mouse.move(bounds!.x + bounds!.width * .8, bounds!.y + bounds!.height * .5); await page.mouse.down();
   await page.mouse.move(bounds!.x + bounds!.width * .2, bounds!.y + bounds!.height * .5, { steps: 10 }); await page.mouse.up();
-  await expect(page.getByText('2 / 8', { exact: true })).toBeVisible(); await expect(page.getByRole('dialog')).toHaveCount(0);
-  await page.getByRole('button', { name: '次の箇所' }).click(); await expect(page.getByText('右側面の付着物候補')).toBeVisible();
+  await expect(page.getByText('2 / 4', { exact: true })).toBeVisible(); await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.getByRole('button', { name: '次の箇所' }).click(); await expect(page.getByText('背中の付着物候補')).toBeVisible();
   await page.getByRole('button', { name: '問題箇所を拡大' }).click(); await expect(page.getByRole('dialog')).toBeVisible();
   await page.getByRole('button', { name: '拡大する' }).click(); await expect(page.getByRole('button', { name: '全体を見る' })).toBeVisible();
   await page.keyboard.press('Escape'); await expect(page.getByRole('dialog')).toHaveCount(0);
@@ -89,7 +105,7 @@ test('extracts eight unique findings from sixteen real frames; mirrored ring, sw
   await expect(page.locator('.detection-ring,img')).toHaveCount(0);
 });
 
-test('four verified clean directions show only the sendoff, then automatically return', async ({ page }) => {
+test('verified clean front and back without side shots show only the sendoff, then automatically return', async ({ page }) => {
   await syntheticCamera(page, false); await modelEvidence(page); await record(page);
   await expect(page.getByText('いってらっしゃい', { exact: true })).toBeVisible({ timeout: 45000 });
   await expect(page.locator('main')).toHaveText('いってらっしゃい'); await expect(page.locator('button,video,img')).toHaveCount(0);
@@ -107,7 +123,7 @@ test('incomplete full-body evidence never shows a sendoff', async ({ page }) => 
   await expect(page.getByText('いってらっしゃい')).toHaveCount(0); expect(await streamsStopped(page)).toBe(true);
 });
 
-test('elapsed time with the same facing direction does not verify four sides', async ({ page }) => {
+test('elapsed time facing front does not verify back', async ({ page }) => {
   await syntheticCamera(page, false); await modelEvidence(page); await page.goto('/');
   await page.evaluate(() => { (window as unknown as { testWrongFacing: boolean }).testWrongFacing = true; });
   await page.getByRole('button', { name: '録画開始' }).click();
@@ -131,9 +147,13 @@ test('denied camera permission provides a short recovery action', async ({ page 
 });
 
 test('stop and pagehide cancel capture, stop streams and discard frames', async ({ page }) => {
-  await syntheticCamera(page); await record(page); await page.getByRole('button', { name: '撮影を中止' }).click();
+  await syntheticCamera(page); await record(page);
+  await page.waitForFunction(()=> (window as unknown as {testRecorders:MediaRecorder[]}).testRecorders[0]?.state === 'recording');
+  await page.getByRole('button', { name: '撮影を中止' }).click();
   await expect(page.getByRole('alert')).toContainText('中断'); expect(await streamsStopped(page)).toBe(true);
+  expect(await page.evaluate(()=>(window as unknown as {testRecorders:MediaRecorder[]}).testRecorders[0].state)).toBe('inactive');
   await page.getByRole('button', { name: 'カメラを再開' }).click(); await page.getByRole('button', { name: '録画開始' }).click();
+  await page.waitForFunction(()=> (window as unknown as {testRecorders:MediaRecorder[]}).testRecorders[1]?.state === 'recording');
   await page.evaluate(() => window.dispatchEvent(new Event('pagehide')));
   await expect(page.getByRole('alert')).toContainText('中断'); expect(await streamsStopped(page)).toBe(true);
   await expect(page.getByText('いってらっしゃい')).toHaveCount(0);
@@ -233,4 +253,33 @@ test('deployment CSP permits the actual local model runtime', async ({ page }) =
   });
   expect(result.complete).toBe(false); expect(result.facing).toBe('unknown');
   expect(result.violations).toEqual([]); expect(external).toEqual([]);
+});
+
+
+test('a brief sticker appearing between the old shot times is extracted from the movie', async ({ page }) => {
+  await syntheticCamera(page, 'brief');await modelEvidence(page);await record(page);
+  await expect(page.getByText('正面の付着物候補')).toBeVisible({timeout:45000});
+  await expect(page.getByText('1 / 2', {exact:true})).toBeVisible();
+  await expect(page.getByText('いってらっしゃい')).toHaveCount(0);
+  expect(await page.locator('.finding-photo img').getAttribute('src')).toMatch(/^data:image\/jpeg/);
+});
+
+test('empty recording data is a recording failure, never a sendoff', async ({ page }) => {
+  await syntheticCamera(page,false);await modelEvidence(page);
+  await page.addInitScript(()=>{ (window as unknown as {testDropRecordingData:boolean}).testDropRecordingData=true; });
+  await record(page);
+  await expect(page.getByRole('alert')).toContainText('撮影が止まりました',{timeout:45000});
+  await expect(page.getByText('いってらっしゃい')).toHaveCount(0);expect(await streamsStopped(page)).toBe(true);
+});
+
+test('cancelling video analysis releases the Blob URL and hidden decoder', async ({ page }) => {
+  await syntheticCamera(page,false);await modelEvidence(page);
+  await page.addInitScript(()=>{ (window as unknown as {testSlowModel:boolean}).testSlowModel=true; });
+  await record(page);
+  await page.waitForFunction(()=> (window as unknown as {testBlobUrls:string[]}).testBlobUrls.length===1);
+  await page.getByRole('button',{name:'中止',exact:true}).click();
+  await expect(page.getByRole('alert')).toContainText('中断');
+  await expect.poll(()=>page.evaluate(()=> (window as unknown as {testRevokedUrls:string[]}).testRevokedUrls.length)).toBe(1);
+  await expect(page.locator('body > video')).toHaveCount(0);
+  await expect(page.getByText('いってらっしゃい')).toHaveCount(0);
 });

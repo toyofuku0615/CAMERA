@@ -55,6 +55,20 @@ describe('segmented garment pixels against different backgrounds', () => {
     const { image, subject } = segmented(100, [{ x: 210, y: 300, width: 1, height: 14 }]);
     expect(analyze(image, DETECTION, subject).boxes).toHaveLength(1);
   });
+  it('adapts to shadowed tape without using background exposure', () => {
+    const { image, subject } = segmented(245, [{ x: 210, y: 300 }]);
+    for (let y=300;y<316;y++)for(let x=210;x<224;x++) { const p=(y*image.width+x)*4; image.data[p]=image.data[p+1]=image.data[p+2]=140; }
+    expect(analyze(image, DETECTION, subject).boxes).toHaveLength(1);
+  });
+  it('detects a bright patch on dark gray cloth using garment-local thresholds', () => {
+    const { image, subject } = segmented(245, [{ x: 210, y: 300 }]);
+    for (let y=165;y<510;y++)for(let x=150;x<330;x++) { const p=(y*image.width+x)*4;if(image.data[p]<80)image.data[p]=image.data[p+1]=image.data[p+2]=100+((x+y)%5); }
+    const a=analyze(image, DETECTION, subject);expect(a.status).toBe('ok');expect(a.boxes).toHaveLength(1);
+  });
+  it('retains an observed tape candidate on a partial body without certifying it as complete', () => {
+    const { image, subject } = segmented(245, [{ x: 210, y: 300 }]);subject.complete=false;
+    const a=analyze(image, DETECTION, subject);expect(a.status).toBe('uncertain');expect(a.boxes).toHaveLength(1);
+  });
   it('never certifies missing segmentation or partial body evidence', () => {
     const { image, subject } = segmented(245); subject.complete = false;
     expect(analyze(image, DETECTION, subject).status).toBe('uncertain');

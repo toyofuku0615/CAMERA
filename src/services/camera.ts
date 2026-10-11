@@ -18,8 +18,8 @@ export async function openCamera(): Promise<MediaStream> {
   } finally { clearTimeout(timer!); }
 }
 export function stopCamera(stream: MediaStream | null) { stream?.getTracks().forEach(track => track.stop()); }
-export function captureFrame(video: HTMLVideoElement): HTMLCanvasElement {
-  if (video.readyState < 2 || !video.videoWidth || !video.videoHeight || video.paused) throw new Error('カメラ画像を取得できませんでした。再撮影してください。');
+export function captureFrame(video: HTMLVideoElement, allowPaused = false): HTMLCanvasElement {
+  if (video.readyState < 2 || !video.videoWidth || !video.videoHeight || (video.paused && !allowPaused)) throw new Error('カメラ画像を取得できませんでした。再撮影してください。');
   const scale = Math.min(1, CAPTURE.maxImageDimension / Math.max(video.videoWidth, video.videoHeight));
   const canvas = document.createElement('canvas');
   canvas.width = Math.round(video.videoWidth * scale); canvas.height = Math.round(video.videoHeight * scale);

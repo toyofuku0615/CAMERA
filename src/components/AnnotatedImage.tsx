@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CheckResult } from '../vision/frames';
 
-export function AnnotatedImage({ result, debug = false }: { result: CheckResult; debug?: boolean }) {
+export function AnnotatedImage({ result, debug = false }: { result: Pick<CheckResult, 'image' | 'width' | 'height' | 'analysis'>; debug?: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const [zoom, setZoom] = useState(1);
   const trigger = useRef<HTMLButtonElement>(null), close = useRef<HTMLButtonElement>(null);
